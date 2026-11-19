@@ -7,12 +7,17 @@
  *     ignored typed text).
  *   - Conversion of un-annotated imported PDFs (issue #16), which used to fail
  *     the whole document with "Can't embed page with missing Contents".
+ *   - Annotated multi-page PDFs are annotated in place, so shared fonts/images
+ *     aren't copied onto every page and internal links keep working.
  *
  * Run: npx tsx --test src/document-converter.test.ts
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PDFDocument } from "pdf-lib";
+import fs from "fs";
+import path from "path";
+import zlib from "zlib";
+import { PDFDocument, PDFName, PDFDict, PDFArray } from "pdf-lib";
 import { convertDocument, extendPageHeightForContent } from "./document-converter";
 import { computeTextBlocksBottomRawY } from "./pdf-renderer";
 import type { Page, Stroke, TextBlock } from "./rm-parser";
@@ -219,4 +224,111 @@ test("un-annotated multi-page PDF converts every page", async () => {
 		[595, 842],
 		[612, 792],
 	]);
+});
+
+// --- Large annotated PDFs are annotated in place ---
+
+/** An incompressible RGB PNG, so a shared image dominates the PDF's size. */
+function noisePng(width: number, height: number): Uint8Array {
+	const crcTable = Array.from({ length: 256 }, (_, n) => {
+		let c = n;
+		for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+		return c >>> 0;
+	});
+	const crc = (buf: Buffer) => {
+		let c = 0xffffffff;
+		for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+		return (c ^ 0xffffffff) >>> 0;
+	};
+	const chunk = (type: string, data: Buffer) => {
+		const len = Buffer.alloc(4);
+		len.writeUInt32BE(data.length);
+		const td = Buffer.concat([Buffer.from(type, "ascii"), data]);
+		const c = Buffer.alloc(4);
+		c.writeUInt32BE(crc(td));
+		return Buffer.concat([len, td, c]);
+	};
+	const ihdr = Buffer.alloc(13);
+	ihdr.writeUInt32BE(width, 0);
+	ihdr.writeUInt32BE(height, 4);
+	ihdr[8] = 8; // bit depth
+	ihdr[9] = 2; // RGB
+	let seed = 12345;
+	const raw = Buffer.alloc((width * 3 + 1) * height);
+	for (let i = 0; i < raw.length; i++) {
+		seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+		raw[i] = i % (width * 3 + 1) === 0 ? 0 : seed >>> 24;
+	}
+	return new Uint8Array(Buffer.concat([
+		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+		chunk("IHDR", ihdr),
+		chunk("IDAT", zlib.deflateSync(raw)),
+		chunk("IEND", Buffer.alloc(0)),
+	]));
+}
+
+function referenceRm(name: string): Uint8Array {
+	const dir = path.join("reference_sheets", name);
+	const file = fs.readdirSync(dir).find((f) => f.endsWith(".rm"))!;
+	return new Uint8Array(fs.readFileSync(path.join(dir, file)));
+}
+
+test("annotating one page of a large PDF keeps shared resources shared", async () => {
+	const pageCount = 40;
+	const original = await PDFDocument.create();
+	const image = await original.embedPng(noisePng(600, 600)); // ~1 MB
+	for (let i = 0; i < pageCount; i++) {
+		original.addPage([540, 960]).drawImage(image, { x: 40, y: 400, width: 460, height: 460 });
+	}
+	const pdfBytes = new Uint8Array(await original.save());
+
+	const enc = (s: string) => new TextEncoder().encode(s);
+	const pageIds = Array.from({ length: pageCount }, (_, i) => `page-${i}`);
+	const files = new Map<string, Uint8Array>();
+	files.set("big.pdf", pdfBytes);
+	files.set("big.metadata", enc(JSON.stringify({ visibleName: "Big PDF", type: "DocumentType" })));
+	files.set("big.content", enc(JSON.stringify({ fileType: "pdf", pages: pageIds })));
+	files.set("big/page-1.rm", referenceRm("Fineliner"));
+
+	const out = await convertDocument("big", files);
+	const doc = await PDFDocument.load(out);
+	assert.equal(doc.getPageCount(), pageCount);
+	// Splitting and re-joining the PDF used to give every page its own copy of
+	// the image (~40x the input). In place, only the ink (~200 KB here) is added.
+	assert.ok(
+		out.length < pdfBytes.length + 500_000,
+		`output ${out.length} bytes vs input ${pdfBytes.length}`
+	);
+	// Only the annotated page gains the annotation layer.
+	const xObjects = (i: number) =>
+		(doc.getPage(i).node.Resources()?.lookup(PDFName.of("XObject"), PDFDict)?.keys().length) ?? 0;
+	assert.equal(xObjects(1), xObjects(0) + 1);
+	assert.equal(xObjects(2), xObjects(0));
+});
+
+test("internal links in an annotated PDF still point at their pages", async () => {
+	const original = await PDFDocument.create();
+	const pages = [0, 1, 2].map(() => original.addPage([540, 960]));
+	// A GoTo link on page 1 pointing at page 3.
+	const link = original.context.obj({
+		Type: "Annot",
+		Subtype: "Link",
+		Rect: [40, 40, 200, 80],
+		Border: [0, 0, 0],
+		Dest: [pages[2].ref, "XYZ", null, null, null],
+	});
+	pages[0].node.set(PDFName.of("Annots"), original.context.obj([original.context.register(link)]));
+	const pdfBytes = new Uint8Array(await original.save());
+
+	const enc = (s: string) => new TextEncoder().encode(s);
+	const files = new Map<string, Uint8Array>();
+	files.set("linked.pdf", pdfBytes);
+	files.set("linked.metadata", enc(JSON.stringify({ visibleName: "Linked", type: "DocumentType" })));
+	files.set("linked.content", enc(JSON.stringify({ fileType: "pdf", pages: ["a", "b", "c"] })));
+	files.set("linked/a.rm", referenceRm("Fineliner"));
+
+	const doc = await PDFDocument.load(await convertDocument("linked", files));
+	const annots = doc.getPage(0).node.lookup(PDFName.of("Annots"), PDFArray);
+	const dest = (annots.lookup(0, PDFDict)).lookup(PDFName.of("Dest"), PDFArray);
+	assert.equal(dest.get(0), doc.getPage(2).ref, "link still targets the third page");
 });

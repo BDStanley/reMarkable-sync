@@ -13,6 +13,11 @@ Sync your reMarkable Paper Pro and Paper Pro Move documents to your Obsidian vau
 >   file (SceneInfo), so Move notebooks render at the Move's page size.
 > - **No clipped ink.** Writing that runs outside the page (margin notes,
 >   zoomed-out writing) grows the output page instead of being cut off.
+> - **Small files for long PDFs.** Annotations are added to the original PDF in
+>   place, so pages without writing are left untouched and fonts/images shared
+>   between pages stay shared. Previously each page carried its own copy (a 4 MB,
+>   60-page PDF synced at 260 MB). Internal links and bookmarks, e.g. in
+>   hyperlinked planners, now keep working too.
 > - **Rotated PDF pages** (`/Rotate`) get correctly oriented annotations.
 > - The sync log notes the paper size and PDF page size of any document that is
 >   not a plain Paper Pro notebook.

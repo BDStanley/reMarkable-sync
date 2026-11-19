@@ -626,51 +626,71 @@ function viewToUser(vx: number, vy: number, crop: Box, rotation: 0 | 90 | 180 | 
 	}
 }
 
+/** True when the page has anything that would actually be drawn. */
+export function pageHasInk(page: Page): boolean {
+	for (const layer of page.layers) {
+		for (const stroke of layer.strokes) {
+			if (stroke.penType === PenType.ERASER || stroke.penType === PenType.ERASER_AREA) continue;
+			if (stroke.points && stroke.points.length >= 2) return true;
+		}
+	}
+	return page.textBlocks.some((tb) => tb.text.trim() !== "");
+}
+
 /**
- * Render the annotations onto the original PDF page. The annotation layer is
- * built in the page's displayed orientation at exactly the page's size (grown
- * only if ink falls outside it), then placed 1:1 over the page.
+ * Draw a page's annotations onto `pdfPage`, a page of `doc`. The annotation
+ * layer is built in the page's displayed orientation at exactly the page's size
+ * (grown only if ink falls outside it), then placed 1:1 over the page.
+ *
+ * Returns false, leaving the page untouched, when there is nothing to draw —
+ * so unannotated pages of a large PDF cost nothing.
  */
+export async function annotatePdfPage(
+	doc: PDFDocument,
+	pdfPage: PDFPage,
+	page: Page
+): Promise<boolean> {
+	if (!pageHasInk(page)) return false;
+
+	const crop = pdfPage.getCropBox();
+	const rotation = normalizeRotation(pdfPage.getRotation().angle);
+	const sideways = rotation === 90 || rotation === 270;
+	const viewWidth = sideways ? crop.height : crop.width;
+	const viewHeight = sideways ? crop.width : crop.height;
+
+	const { geo, growth } = growForInk(page, backgroundGeometry(viewWidth, viewHeight));
+	const annotDoc = await PDFDocument.load(await renderAnnotationLayer(page, geo));
+
+	// A layer with nothing drawn has no /Contents stream, and pdf-lib throws
+	// "Can't embed page with missing Contents" (lazily, during save) if asked
+	// to embed one. pageHasInk() should already have caught this.
+	if (annotDoc.getPageCount() === 0 || !annotationPageHasContents(annotDoc)) return false;
+
+	const [embeddedPage] = await doc.embedPdf(annotDoc, [0]);
+
+	// The layer's bottom-left corner sits at view (-left, -bottom); turn the
+	// layer with the page so it reads upright once /Rotate applies.
+	const anchor = viewToUser(-growth.left, -growth.bottom, crop, rotation);
+	pdfPage.drawPage(embeddedPage, {
+		x: anchor.x,
+		y: anchor.y,
+		width: geo.pageWidthPt,
+		height: geo.pageHeightPt,
+		rotate: degrees(rotation),
+	});
+
+	if (growth.left || growth.right || growth.bottom || growth.top) {
+		expandPageBoxes(pdfPage, crop, rotation, growth, viewWidth, viewHeight);
+	}
+	return true;
+}
+
+/** Annotate a single-page background PDF (used for one-off renders and tests). */
 async function renderOnBackground(page: Page, backgroundPdf: Uint8Array): Promise<Uint8Array> {
 	try {
 		const bgDoc = await PDFDocument.load(backgroundPdf);
 		if (bgDoc.getPageCount() === 0) return backgroundPdf;
-
-		const bgPage = bgDoc.getPages()[0];
-		const crop = bgPage.getCropBox();
-		const rotation = normalizeRotation(bgPage.getRotation().angle);
-		const sideways = rotation === 90 || rotation === 270;
-		const viewWidth = sideways ? crop.height : crop.width;
-		const viewHeight = sideways ? crop.width : crop.height;
-
-		const { geo, growth } = growForInk(page, backgroundGeometry(viewWidth, viewHeight));
-		const annotDoc = await PDFDocument.load(await renderAnnotationLayer(page, geo));
-
-		// Only embed the annotation overlay when it actually has drawn content.
-		// Un-annotated reMarkable pages (e.g. unread imported PDF pages, default
-		// "Go further" docs) render to a blank page with no /Contents stream;
-		// pdf-lib throws "Can't embed page with missing Contents" when embedding
-		// such a page (the check runs lazily during save). For those pages there
-		// is nothing to overlay, so we keep the background untouched.
-		if (annotDoc.getPageCount() > 0 && annotationPageHasContents(annotDoc)) {
-			const [embeddedPage] = await bgDoc.embedPdf(annotDoc, [0]);
-
-			// The layer's bottom-left corner sits at view (-left, -bottom); turn
-			// the layer with the page so it reads upright once /Rotate applies.
-			const anchor = viewToUser(-growth.left, -growth.bottom, crop, rotation);
-			bgPage.drawPage(embeddedPage, {
-				x: anchor.x,
-				y: anchor.y,
-				width: geo.pageWidthPt,
-				height: geo.pageHeightPt,
-				rotate: degrees(rotation),
-			});
-
-			if (growth.left || growth.right || growth.bottom || growth.top) {
-				expandPageBoxes(bgPage, crop, rotation, growth, viewWidth, viewHeight);
-			}
-		}
-
+		await annotatePdfPage(bgDoc, bgDoc.getPages()[0], page);
 		// NOTE: must be `return await` — a bare `return bgDoc.save()` lets a
 		// rejection escape this try/catch (the promise is returned before it
 		// settles), which is what previously failed entire documents.

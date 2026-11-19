@@ -18,6 +18,7 @@ import {
 	renderPageToPdf,
 	renderNotebookToPdf,
 	computeTextBlocksBottomRawY,
+	annotatePdfPage,
 } from "./pdf-renderer";
 
 // --- Data structures ---
@@ -94,7 +95,6 @@ export class DocumentConverter {
 		}
 
 		const parsedPages: Page[] = [];
-		const backgroundPdfs: (Uint8Array | null)[] = [];
 
 		for (let i = 0; i < content.pages.length; i++) {
 			const pageInfo = content.pages[i];
@@ -120,17 +120,6 @@ export class DocumentConverter {
 			} else {
 				parsedPages.push(emptyPage(pageInfo.pageId));
 			}
-
-			if (content.originalPdf) {
-				try {
-					const bgPage = await this.extractPdfPage(content.originalPdf, i);
-					backgroundPdfs.push(bgPage);
-				} catch {
-					backgroundPdfs.push(null);
-				}
-			} else {
-				backgroundPdfs.push(null);
-			}
 		}
 
 		// Blank pages (no .rm file) take the paper size the rest of the document
@@ -143,15 +132,21 @@ export class DocumentConverter {
 				}
 			}
 		}
-		if (log) {
-			const summary = await describeLayout(parsedPages, backgroundPdfs);
-			if (summary) log(summary);
+		if (content.originalPdf) {
+			const annotated = await renderOntoOriginal(content.originalPdf, parsedPages, log);
+			if (annotated) return annotated;
+			// The original PDF couldn't be read (e.g. encrypted): fall back to
+			// the annotations on their own, as before.
 		}
 
-		if (parsedPages.length === 1) {
-			return renderPageToPdf(parsedPages[0], backgroundPdfs[0] ?? undefined);
+		if (log) {
+			const summary = describeLayout(parsedPages, []);
+			if (summary) log(summary);
 		}
-		return renderNotebookToPdf(parsedPages, backgroundPdfs);
+		if (parsedPages.length === 1) {
+			return renderPageToPdf(parsedPages[0]);
+		}
+		return renderNotebookToPdf(parsedPages);
 	}
 
 	// --- Archive processing ---
@@ -291,23 +286,6 @@ export class DocumentConverter {
 		}
 		return null;
 	}
-
-	private async extractPdfPage(
-		pdfData: Uint8Array,
-		pageNum: number
-	): Promise<Uint8Array | null> {
-		try {
-			const srcDoc = await PDFDocument.load(pdfData);
-			if (pageNum >= srcDoc.getPageCount()) return null;
-
-			const newDoc = await PDFDocument.create();
-			const [copiedPage] = await newDoc.copyPages(srcDoc, [pageNum]);
-			newDoc.addPage(copiedPage);
-			return new Uint8Array(await newDoc.save());
-		} catch {
-			return null;
-		}
-	}
 }
 
 // Extend the page height when stroke OR typed-text content runs past the default
@@ -369,20 +347,10 @@ function paperLabel(paper: PaperSize | null | undefined): string {
  * produced when something differs from a plain Paper Pro notebook, so routine
  * syncs stay quiet.
  */
-async function describeLayout(
-	pages: Page[],
-	backgroundPdfs: (Uint8Array | null)[]
-): Promise<string | null> {
-	const papers = new Set(pages.map((p) => paperLabel(p.paperSize)));
-	const bgSizes = new Set<string>();
-	for (const bg of backgroundPdfs) {
-		if (!bg) continue;
-		try {
-			const doc = await PDFDocument.load(bg);
-			const { width, height } = doc.getPage(0).getCropBox();
-			bgSizes.add(`${Math.round(width)}x${Math.round(height)}pt`);
-		} catch { /* best-effort only */ }
-	}
+function describeLayout(pages: Page[], pdfPageSizes: string[]): string | null {
+	const papers = new Set(pages.filter(pageHasContent).map((p) => paperLabel(p.paperSize)));
+	if (papers.size === 0) papers.add(paperLabel(pages[0]?.paperSize));
+	const bgSizes = new Set(pdfPageSizes);
 	const papersText = Array.from(papers).join(", ");
 	if (bgSizes.size === 0 && papersText === paperLabel({ width: 1620, height: 2160 })) {
 		return null;
@@ -390,6 +358,77 @@ async function describeLayout(
 	const parts = [`paper ${papersText}`];
 	if (bgSizes.size > 0) parts.push(`PDF pages ${Array.from(bgSizes).join(", ")}`);
 	return `Layout: ${parts.join("; ")}`;
+}
+
+function pageHasContent(page: Page): boolean {
+	return page.layers.length > 0 || page.textBlocks.length > 0;
+}
+
+/**
+ * Add the annotations to the original PDF in place: load it once, draw on the
+ * pages that have writing, save once. Pages without writing are left exactly as
+ * they were, and fonts/images the PDF shares between pages stay shared.
+ *
+ * (Splitting the PDF into one-page documents and joining them again, as before,
+ * gave every page its own copy of those shared resources — a 4 MB, 60-page PDF
+ * came back at 260 MB — and re-read the whole PDF once per page.)
+ *
+ * Page i of the reMarkable document is page i of the PDF, as before. Extra
+ * pages added on the tablet are appended as plain notebook pages; PDF pages
+ * beyond the document's page list are dropped. Returns null if the PDF can't be
+ * loaded or saved.
+ */
+async function renderOntoOriginal(
+	pdfData: Uint8Array,
+	pages: Page[],
+	log?: (message: string) => void
+): Promise<Uint8Array | null> {
+	let doc: PDFDocument;
+	try {
+		doc = await PDFDocument.load(pdfData);
+	} catch {
+		return null;
+	}
+
+	const pdfPageCount = doc.getPageCount();
+	const sizes = new Set<string>();
+	for (let i = 0; i < pages.length && i < pdfPageCount; i++) {
+		const pdfPage = doc.getPage(i);
+		try {
+			const drawn = await annotatePdfPage(doc, pdfPage, pages[i]);
+			if (drawn) {
+				const { width, height } = pdfPage.getCropBox();
+				sizes.add(`${Math.round(width)}x${Math.round(height)}pt`);
+			}
+		} catch {
+			// Leave this page as it was rather than failing the document.
+		}
+	}
+
+	for (let i = pdfPageCount - 1; i >= pages.length; i--) {
+		doc.removePage(i);
+	}
+
+	if (pages.length > pdfPageCount) {
+		const extra = await PDFDocument.load(await renderNotebookToPdf(pages.slice(pdfPageCount)));
+		const copied = await doc.copyPages(extra, extra.getPageIndices());
+		for (const p of copied) doc.addPage(p);
+	}
+
+	if (log) {
+		if (sizes.size === 0 && doc.getPageCount() > 0) {
+			const { width, height } = doc.getPage(0).getCropBox();
+			sizes.add(`${Math.round(width)}x${Math.round(height)}pt`);
+		}
+		const summary = describeLayout(pages, Array.from(sizes));
+		if (summary) log(summary);
+	}
+
+	try {
+		return await doc.save();
+	} catch {
+		return null;
+	}
 }
 
 function emptyPage(pageId: string): Page {
