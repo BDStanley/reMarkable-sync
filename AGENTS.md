@@ -78,7 +78,7 @@ tsconfig.json
 Colors, pen widths, opacity, font sizes, and the coordinate mapping
 (one `.rm` unit = `514/1620` pt, center-origin X; notebook canvases use the
 page's SceneInfo paper size, e.g. Paper Pro `1620x2160` → `514x685pt`, Paper Pro
-Move `954x1696`; annotations on PDFs are placed at that same fixed scale,
+Move `1404x1872`, like the reMarkable 2; annotations on PDFs are placed at that same fixed scale,
 centred and top-aligned on the original page) are tuned to match
 ground truth. If you touch any of this:
 

@@ -165,7 +165,8 @@ export interface Page {
 	height: number;
 	/**
 	 * Paper size the page was written on, from the SceneInfo block (e.g. Paper
-	 * Pro 1620x2160, Paper Pro Move 954x1696). Null when the file has none.
+	 * Pro 1620x2160; reMarkable 2 and Paper Pro Move 1404x1872). Null when the
+	 * file has none.
 	 */
 	paperSize?: PaperSize | null;
 }

@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "fs";
 import path from "path";
 import zlib from "zlib";
-import { PDFDocument, PDFName, PDFDict, PDFArray } from "pdf-lib";
+import { PDFDocument, PDFName, PDFDict, PDFArray, PDFString } from "pdf-lib";
 import { convertDocument, extendPageHeightForContent } from "./document-converter";
 import { computeTextBlocksBottomRawY } from "./pdf-renderer";
 import type { Page, Stroke, TextBlock } from "./rm-parser";
@@ -228,6 +228,12 @@ test("un-annotated multi-page PDF converts every page", async () => {
 
 // --- Large annotated PDFs are annotated in place ---
 
+function inkPagesOf(doc: PDFDocument): string | undefined {
+	const info = doc.context.lookup(doc.context.trailerInfo.Info, PDFDict);
+	const v = info?.lookup(PDFName.of("ReMarkableInkPages"));
+	return v ? (v as PDFString).decodeText() : undefined;
+}
+
 /** An incompressible RGB PNG, so a shared image dominates the PDF's size. */
 function noisePng(width: number, height: number): Uint8Array {
 	const crcTable = Array.from({ length: 256 }, (_, n) => {
@@ -299,6 +305,8 @@ test("annotating one page of a large PDF keeps shared resources shared", async (
 		out.length < pdfBytes.length + 500_000,
 		`output ${out.length} bytes vs input ${pdfBytes.length}`
 	);
+	// The PDF records that only page 2 has handwriting.
+	assert.equal(inkPagesOf(doc), "2");
 	// Only the annotated page gains the annotation layer.
 	const xObjects = (i: number) =>
 		(doc.getPage(i).node.Resources()?.lookup(PDFName.of("XObject"), PDFDict)?.keys().length) ?? 0;
@@ -331,4 +339,23 @@ test("internal links in an annotated PDF still point at their pages", async () =
 	const annots = doc.getPage(0).node.lookup(PDFName.of("Annots"), PDFArray);
 	const dest = (annots.lookup(0, PDFDict)).lookup(PDFName.of("Dest"), PDFArray);
 	assert.equal(dest.get(0), doc.getPage(2).ref, "link still targets the third page");
+});
+
+test("a notebook records which of its pages have handwriting", async () => {
+	const enc = (s: string) => new TextEncoder().encode(s);
+	const files = new Map<string, Uint8Array>();
+	files.set("nb.metadata", enc(JSON.stringify({ visibleName: "Notebook", type: "DocumentType" })));
+	files.set("nb.content", enc(JSON.stringify({ fileType: "notebook", pages: ["a", "b", "c"] })));
+	files.set("nb/b.rm", referenceRm("Fineliner"));
+	files.set("nb/c.rm", referenceRm("Blank"));
+
+	const doc = await PDFDocument.load(await convertDocument("nb", files));
+	assert.equal(doc.getPageCount(), 3);
+	assert.equal(inkPagesOf(doc), "2");
+});
+
+test("an un-annotated PDF records that no page has handwriting", async () => {
+	const files = await unannotatedPdfArchive("doc3", [[612, 792], [612, 792]]);
+	const doc = await PDFDocument.load(await convertDocument("doc3", files));
+	assert.equal(inkPagesOf(doc), "");
 });

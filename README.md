@@ -10,7 +10,8 @@ Sync your reMarkable Paper Pro and Paper Pro Move documents to your Obsidian vau
 >   stretching a Paper Pro-sized canvas over the page. Before, ink on PDFs made
 >   for the Move (or any page larger than 514×685 pt) was cut off at the edges.
 > - **Paper size per page.** Each page's own paper size is read from the `.rm`
->   file (SceneInfo), so Move notebooks render at the Move's page size.
+>   file (SceneInfo) instead of assuming the Paper Pro's. (The Move reports the
+>   reMarkable 2's 1404×1872.)
 > - **No clipped ink.** Writing that runs outside the page (margin notes,
 >   zoomed-out writing) grows the output page instead of being cut off.
 > - **Small files for long PDFs.** Annotations are added to the original PDF in
@@ -19,6 +20,9 @@ Sync your reMarkable Paper Pro and Paper Pro Move documents to your Obsidian vau
 >   60-page PDF synced at 260 MB). Internal links and bookmarks, e.g. in
 >   hyperlinked planners, now keep working too.
 > - **Rotated PDF pages** (`/Rotate`) get correctly oriented annotations.
+> - **Pages with handwriting are recorded** in each PDF's Info dictionary
+>   (`ReMarkableInkPages`, e.g. `3,4`), so tools that transcribe the PDFs can
+>   skip pages that only carry printed content, such as an unused planner day.
 > - The sync log notes the paper size and PDF page size of any document that is
 >   not a plain Paper Pro notebook.
 >

@@ -9,7 +9,8 @@ import { renderPageToPdf, growForInk, COORD_SCALE } from "./pdf-renderer";
 
 // --- Helpers ---
 
-const MOVE_PAPER = { width: 954, height: 1696 };
+// The Paper Pro Move reports the reMarkable 2's paper size in SceneInfo.
+const MOVE_PAPER = { width: 1404, height: 1872 };
 
 /** A minimal v6 .rm file holding just a SceneInfo block with a paper size. */
 function rmWithPaperSize(width: number, height: number): ArrayBuffer {
@@ -84,9 +85,9 @@ test("SceneInfo paper size is read from a Paper Pro reference page", () => {
 	assert.equal(page.height, 1872);
 });
 
-test("a Paper Pro Move paper size is picked up and scales the page", () => {
+test("a non-Paper Pro paper size is picked up and scales the page", () => {
 	const page = parseRmFile(rmWithPaperSize(954, 1696));
-	assert.deepEqual(page.paperSize, MOVE_PAPER);
+	assert.deepEqual(page.paperSize, { width: 954, height: 1696 });
 	assert.ok(Math.abs(page.width - 954 * (1404 / 1620)) < 1e-9);
 	assert.ok(Math.abs(page.height - 1696 * (1404 / 1620)) < 1e-9);
 });
@@ -97,8 +98,8 @@ test("a Move notebook page is rendered at the Move's paper size", async () => {
 	const page = pageWith([line([[-400, 100], [400, 1600]])]);
 	const out = await firstPage(await renderPageToPdf(page));
 	const { width, height } = out.getSize();
-	assert.ok(Math.abs(width - 954 * COORD_SCALE) < 0.01, `width ${width}`);
-	assert.ok(Math.abs(height - 1696 * COORD_SCALE) < 0.01, `height ${height}`);
+	assert.ok(Math.abs(width - MOVE_PAPER.width * COORD_SCALE) < 0.01, `width ${width}`);
+	assert.ok(Math.abs(height - MOVE_PAPER.height * COORD_SCALE) < 0.01, `height ${height}`);
 });
 
 // --- PDF-backed pages ---

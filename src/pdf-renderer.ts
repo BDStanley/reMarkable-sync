@@ -8,6 +8,9 @@
 import {
 	PDFDocument,
 	PDFPage,
+	PDFDict,
+	PDFName,
+	PDFString,
 	rgb,
 	StandardFonts,
 	PDFFont,
@@ -299,7 +302,8 @@ const OVERFLOW_MARGIN_PT = 10;
 
 /**
  * Notebook page: the canvas is the paper size the page was written on
- * (Paper Pro 1620 units = 514pt wide; Paper Pro Move 954 units ≈ 303pt).
+ * (Paper Pro 1620 units = 514pt wide; reMarkable 2 / Paper Pro Move 1404 units
+ * ≈ 445pt).
  * Height comes from `page.height`, which `extendPageHeightForContent` may have
  * grown for long, scrolled pages.
  */
@@ -594,7 +598,24 @@ export async function renderNotebookToPdf(
 		}
 	}
 
+	markInkPages(outputDoc, pages);
 	return outputDoc.save();
+}
+
+/** Info-dictionary key listing the pages (1-based) that carry handwriting. */
+export const INK_PAGES_KEY = "ReMarkableInkPages";
+
+/**
+ * Record which output pages have handwriting, as a comma-separated list in the
+ * PDF's Info dictionary (empty when none). Page k of the output is `pages[k]`.
+ * Lets downstream tools (e.g. transcription) skip pages that only carry the
+ * original PDF's printed content.
+ */
+export function markInkPages(doc: PDFDocument, pages: Page[]): void {
+	const list = pages.flatMap((p, i) => (pageHasInk(p) ? [String(i + 1)] : [])).join(",");
+	// pdf-lib keeps getInfoDict() private; it is the documented Info dictionary.
+	const info = (doc as unknown as { getInfoDict(): PDFDict }).getInfoDict();
+	info.set(PDFName.of(INK_PAGES_KEY), PDFString.of(list));
 }
 
 interface Box {

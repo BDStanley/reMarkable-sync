@@ -15,10 +15,10 @@ import {
 	type PaperSize,
 } from "./rm-parser";
 import {
-	renderPageToPdf,
 	renderNotebookToPdf,
 	computeTextBlocksBottomRawY,
 	annotatePdfPage,
+	markInkPages,
 } from "./pdf-renderer";
 
 // --- Data structures ---
@@ -142,9 +142,6 @@ export class DocumentConverter {
 		if (log) {
 			const summary = describeLayout(parsedPages, []);
 			if (summary) log(summary);
-		}
-		if (parsedPages.length === 1) {
-			return renderPageToPdf(parsedPages[0]);
 		}
 		return renderNotebookToPdf(parsedPages);
 	}
@@ -331,8 +328,7 @@ export async function extendPageHeightForContent(page: Page): Promise<void> {
 // Paper sizes reported in SceneInfo by the tablets we know about.
 const KNOWN_PAPER: Record<string, string> = {
 	"1620x2160": "Paper Pro",
-	"1404x1872": "reMarkable 2",
-	"954x1696": "Paper Pro Move",
+	"1404x1872": "reMarkable 2 or Paper Pro Move",
 };
 
 function paperLabel(paper: PaperSize | null | undefined): string {
@@ -424,6 +420,7 @@ async function renderOntoOriginal(
 		if (summary) log(summary);
 	}
 
+	markInkPages(doc, pages);
 	try {
 		return await doc.save();
 	} catch {
