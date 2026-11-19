@@ -14,10 +14,11 @@ import {
 	LineCapStyle,
 	LineJoinStyle,
 	setLineJoin,
+	degrees,
 } from "pdf-lib";
 
 import type { Page, Stroke, Point, TextBlock } from "./rm-parser";
-import { PenType } from "./rm-parser";
+import { PenType, DEFAULT_PAPER_WIDTH } from "./rm-parser";
 
 // --- Constants ---
 
@@ -263,28 +264,115 @@ export async function computeTextBlocksBottomRawY(page: Page): Promise<number> {
 
 // --- Page geometry ---
 
+/**
+ * Where the .rm coordinate system sits on the output page.
+ *
+ * .rm coordinates are centre-origin in x and top-origin in y, in units of
+ * COORD_SCALE (514/1620) PDF points. That unit is fixed — it does not depend on
+ * which tablet wrote the page — so only the canvas size and the position of the
+ * origin change between devices and between notebooks and PDFs.
+ */
 interface PageGeometry {
-	xOffset: number;
-	yOffset: number;
+	/** PDF x of .rm x = 0. */
+	originX: number;
+	/** PDF y of .rm y = 0. */
+	topY: number;
 	pageWidthPt: number;
 	pageHeightPt: number;
 }
 
-function computePageGeometry(
-	page: Page,
-	_font: PDFFont,
-	_boldFont: PDFFont
-): PageGeometry {
-	// .rm X coordinates are center-origin (-702..+702).
-	// In screen space they sit at x + 810 (half of 1620 screen width).
-	const halfScreenWidth = RM_SCREEN_WIDTH_PX / 2; // 810
+/** Extra space added on each side so ink outside the page isn't clipped. */
+interface Growth {
+	left: number;
+	right: number;
+	bottom: number;
+	top: number;
+}
 
+const NO_GROWTH: Growth = { left: 0, right: 0, bottom: 0, top: 0 };
+
+// Ink must stick out by more than this before the page grows, so strokes that
+// merely touch the edge (normal on full pages) leave the page size untouched.
+const OVERFLOW_TOLERANCE_PT = 2;
+// Breathing room kept around ink that did force the page to grow.
+const OVERFLOW_MARGIN_PT = 10;
+
+/**
+ * Notebook page: the canvas is the paper size the page was written on
+ * (Paper Pro 1620 units = 514pt wide; Paper Pro Move 954 units ≈ 303pt).
+ * Height comes from `page.height`, which `extendPageHeightForContent` may have
+ * grown for long, scrolled pages.
+ */
+function notebookGeometry(page: Page): PageGeometry {
+	const paperWidth = page.paperSize?.width ?? DEFAULT_PAPER_WIDTH;
+	const pageWidthPt = paperWidth * COORD_SCALE;
+	const pageHeightPt = page.height * SCALE;
 	return {
-		xOffset: halfScreenWidth,
-		yOffset: 0,
-		// Page dimensions stay the same (514 x 685.3pt for standard pages)
-		pageWidthPt: RM_SCREEN_WIDTH_PX * COORD_SCALE, // 514pt
-		pageHeightPt: page.height * SCALE, // 1872 * 514/1404 = 685.3pt
+		originX: pageWidthPt / 2,
+		topY: pageHeightPt,
+		pageWidthPt,
+		pageHeightPt,
+	};
+}
+
+/**
+ * PDF-backed page: the tablet lays the PDF page out at the same fixed scale,
+ * centred on x = 0 with its top edge at y = 0, whatever the page size or the
+ * device. So the annotation layer must match the background page exactly —
+ * stretching a fixed Paper Pro-sized canvas over it (as before) only lined up
+ * for 514x685pt pages and cut off ink on larger ones, such as PDFs made for the
+ * Paper Pro Move.
+ */
+function backgroundGeometry(viewWidthPt: number, viewHeightPt: number): PageGeometry {
+	return {
+		originX: viewWidthPt / 2,
+		topY: viewHeightPt,
+		pageWidthPt: viewWidthPt,
+		pageHeightPt: viewHeightPt,
+	};
+}
+
+/** Grow the page where stroke points fall outside it (margin notes, zoomed-out writing). */
+export function growForInk(page: Page, geo: PageGeometry): { geo: PageGeometry; growth: Growth } {
+	let minX = Infinity;
+	let maxX = -Infinity;
+	let minY = Infinity;
+	let maxY = -Infinity;
+	for (const layer of page.layers) {
+		for (const stroke of layer.strokes) {
+			if (stroke.penType === PenType.ERASER || stroke.penType === PenType.ERASER_AREA) continue;
+			for (const pt of stroke.points) {
+				const { px, py } = toPdf(pt.x, pt.y, geo);
+				if (px < minX) minX = px;
+				if (px > maxX) maxX = px;
+				if (py < minY) minY = py;
+				if (py > maxY) maxY = py;
+			}
+		}
+	}
+	if (minX === Infinity) return { geo, growth: NO_GROWTH };
+
+	const growth: Growth = {
+		left: minX < -OVERFLOW_TOLERANCE_PT ? -minX + OVERFLOW_MARGIN_PT : 0,
+		right: maxX > geo.pageWidthPt + OVERFLOW_TOLERANCE_PT
+			? maxX - geo.pageWidthPt + OVERFLOW_MARGIN_PT
+			: 0,
+		bottom: minY < -OVERFLOW_TOLERANCE_PT ? -minY + OVERFLOW_MARGIN_PT : 0,
+		top: maxY > geo.pageHeightPt + OVERFLOW_TOLERANCE_PT
+			? maxY - geo.pageHeightPt + OVERFLOW_MARGIN_PT
+			: 0,
+	};
+	if (!growth.left && !growth.right && !growth.bottom && !growth.top) {
+		return { geo, growth: NO_GROWTH };
+	}
+	return {
+		geo: {
+			originX: geo.originX + growth.left,
+			topY: geo.topY + growth.bottom,
+			pageWidthPt: geo.pageWidthPt + growth.left + growth.right,
+			pageHeightPt: geo.pageHeightPt + growth.bottom + growth.top,
+		},
+		growth,
 	};
 }
 
@@ -294,8 +382,8 @@ function toPdf(
 	geo: PageGeometry
 ): { px: number; py: number } {
 	return {
-		px: (x + geo.xOffset) * COORD_SCALE,
-		py: geo.pageHeightPt - (y - geo.yOffset) * COORD_SCALE,
+		px: geo.originX + x * COORD_SCALE,
+		py: geo.topY - y * COORD_SCALE,
 	};
 }
 
@@ -440,16 +528,13 @@ async function renderTextBlock(
 
 // --- Public API ---
 
-export async function renderPageToPdf(
-	page: Page,
-	backgroundPdf?: Uint8Array
-): Promise<Uint8Array> {
+/** Draw a page's strokes and typed text onto a fresh one-page PDF of `geo`'s size. */
+async function renderAnnotationLayer(page: Page, geo: PageGeometry): Promise<Uint8Array> {
 	const doc = await PDFDocument.create();
 
 	const font = await doc.embedFont(StandardFonts.Helvetica);
 	const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
 
-	const geo = computePageGeometry(page, font, boldFont);
 	const pdfPage = doc.addPage([geo.pageWidthPt, geo.pageHeightPt]);
 
 	const extGStates = new Map<number, string>();
@@ -478,14 +563,18 @@ export async function renderPageToPdf(
 		await renderTextBlock(pdfPage, tb, geo, font, boldFont);
 	}
 
-	const annotationBytes = await doc.save();
+	return doc.save();
+}
 
-	// Merge with background if provided
+export async function renderPageToPdf(
+	page: Page,
+	backgroundPdf?: Uint8Array
+): Promise<Uint8Array> {
 	if (backgroundPdf) {
-		return mergeWithBackground(annotationBytes, backgroundPdf);
+		return renderOnBackground(page, backgroundPdf);
 	}
-
-	return annotationBytes;
+	const { geo } = growForInk(page, notebookGeometry(page));
+	return renderAnnotationLayer(page, geo);
 }
 
 export async function renderNotebookToPdf(
@@ -508,17 +597,54 @@ export async function renderNotebookToPdf(
 	return outputDoc.save();
 }
 
-async function mergeWithBackground(
-	annotationPdf: Uint8Array,
-	backgroundPdf: Uint8Array
-): Promise<Uint8Array> {
+interface Box {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+function normalizeRotation(angle: number): 0 | 90 | 180 | 270 {
+	const r = (((Math.round(angle / 90) * 90) % 360) + 360) % 360;
+	return r as 0 | 90 | 180 | 270;
+}
+
+/**
+ * Map a point in "view" space (the page as displayed, after /Rotate; origin at
+ * the bottom-left of the crop box, y up) back to the page's user space.
+ */
+function viewToUser(vx: number, vy: number, crop: Box, rotation: 0 | 90 | 180 | 270): { x: number; y: number } {
+	switch (rotation) {
+		case 90:
+			return { x: crop.x + crop.width - vy, y: crop.y + vx };
+		case 180:
+			return { x: crop.x + crop.width - vx, y: crop.y + crop.height - vy };
+		case 270:
+			return { x: crop.x + vy, y: crop.y + crop.height - vx };
+		default:
+			return { x: crop.x + vx, y: crop.y + vy };
+	}
+}
+
+/**
+ * Render the annotations onto the original PDF page. The annotation layer is
+ * built in the page's displayed orientation at exactly the page's size (grown
+ * only if ink falls outside it), then placed 1:1 over the page.
+ */
+async function renderOnBackground(page: Page, backgroundPdf: Uint8Array): Promise<Uint8Array> {
 	try {
 		const bgDoc = await PDFDocument.load(backgroundPdf);
-		const annotDoc = await PDFDocument.load(annotationPdf);
-
 		if (bgDoc.getPageCount() === 0) return backgroundPdf;
 
 		const bgPage = bgDoc.getPages()[0];
+		const crop = bgPage.getCropBox();
+		const rotation = normalizeRotation(bgPage.getRotation().angle);
+		const sideways = rotation === 90 || rotation === 270;
+		const viewWidth = sideways ? crop.height : crop.width;
+		const viewHeight = sideways ? crop.width : crop.height;
+
+		const { geo, growth } = growForInk(page, backgroundGeometry(viewWidth, viewHeight));
+		const annotDoc = await PDFDocument.load(await renderAnnotationLayer(page, geo));
 
 		// Only embed the annotation overlay when it actually has drawn content.
 		// Un-annotated reMarkable pages (e.g. unread imported PDF pages, default
@@ -528,13 +654,21 @@ async function mergeWithBackground(
 		// is nothing to overlay, so we keep the background untouched.
 		if (annotDoc.getPageCount() > 0 && annotationPageHasContents(annotDoc)) {
 			const [embeddedPage] = await bgDoc.embedPdf(annotDoc, [0]);
-			const { width, height } = bgPage.getSize();
+
+			// The layer's bottom-left corner sits at view (-left, -bottom); turn
+			// the layer with the page so it reads upright once /Rotate applies.
+			const anchor = viewToUser(-growth.left, -growth.bottom, crop, rotation);
 			bgPage.drawPage(embeddedPage, {
-				x: 0,
-				y: 0,
-				width,
-				height,
+				x: anchor.x,
+				y: anchor.y,
+				width: geo.pageWidthPt,
+				height: geo.pageHeightPt,
+				rotate: degrees(rotation),
 			});
+
+			if (growth.left || growth.right || growth.bottom || growth.top) {
+				expandPageBoxes(bgPage, crop, rotation, growth, viewWidth, viewHeight);
+			}
 		}
 
 		// NOTE: must be `return await` — a bare `return bgDoc.save()` lets a
@@ -546,6 +680,33 @@ async function mergeWithBackground(
 		// preserved; the blank annotation overlay would otherwise be lost.
 		return backgroundPdf;
 	}
+}
+
+/** Enlarge the visible page so ink written beyond the PDF page stays visible. */
+function expandPageBoxes(
+	bgPage: PDFPage,
+	crop: Box,
+	rotation: 0 | 90 | 180 | 270,
+	growth: Growth,
+	viewWidth: number,
+	viewHeight: number
+): void {
+	const corners = [
+		viewToUser(-growth.left, -growth.bottom, crop, rotation),
+		viewToUser(viewWidth + growth.right, viewHeight + growth.top, crop, rotation),
+	];
+	const x0 = Math.min(corners[0].x, corners[1].x);
+	const y0 = Math.min(corners[0].y, corners[1].y);
+	const x1 = Math.max(corners[0].x, corners[1].x);
+	const y1 = Math.max(corners[0].y, corners[1].y);
+
+	const media = bgPage.getMediaBox();
+	const mx0 = Math.min(media.x, x0);
+	const my0 = Math.min(media.y, y0);
+	const mx1 = Math.max(media.x + media.width, x1);
+	const my1 = Math.max(media.y + media.height, y1);
+	bgPage.setMediaBox(mx0, my0, mx1 - mx0, my1 - my0);
+	bgPage.setCropBox(x0, y0, x1 - x0, y1 - y0);
 }
 
 // True when the first page of the annotation document carries a /Contents

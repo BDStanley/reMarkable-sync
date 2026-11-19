@@ -8,7 +8,12 @@
  */
 
 import { PDFDocument } from "pdf-lib";
-import { parseRmFile, type Page } from "./rm-parser";
+import {
+	parseRmFile,
+	pageDimensionsForPaper,
+	type Page,
+	type PaperSize,
+} from "./rm-parser";
 import {
 	renderPageToPdf,
 	renderNotebookToPdf,
@@ -78,7 +83,7 @@ export class DocumentConverter {
 		return this.content;
 	}
 
-	async convertToPdf(): Promise<Uint8Array> {
+	async convertToPdf(log?: (message: string) => void): Promise<Uint8Array> {
 		const content = await this.parse();
 
 		if (content.pages.length === 0) {
@@ -126,6 +131,21 @@ export class DocumentConverter {
 			} else {
 				backgroundPdfs.push(null);
 			}
+		}
+
+		// Blank pages (no .rm file) take the paper size the rest of the document
+		// was written on, so a Move notebook doesn't gain Paper Pro-sized pages.
+		const docPaper = parsedPages.find((p) => p.paperSize)?.paperSize ?? null;
+		if (docPaper) {
+			for (const p of parsedPages) {
+				if (!p.paperSize && p.layers.length === 0 && p.textBlocks.length === 0) {
+					Object.assign(p, pageDimensionsForPaper(docPaper), { paperSize: docPaper });
+				}
+			}
+		}
+		if (log) {
+			const summary = await describeLayout(parsedPages, backgroundPdfs);
+			if (summary) log(summary);
 		}
 
 		if (parsedPages.length === 1) {
@@ -330,6 +350,48 @@ export async function extendPageHeightForContent(page: Page): Promise<void> {
 	}
 }
 
+// Paper sizes reported in SceneInfo by the tablets we know about.
+const KNOWN_PAPER: Record<string, string> = {
+	"1620x2160": "Paper Pro",
+	"1404x1872": "reMarkable 2",
+	"954x1696": "Paper Pro Move",
+};
+
+function paperLabel(paper: PaperSize | null | undefined): string {
+	if (!paper) return "no paper size recorded";
+	const key = `${paper.width}x${paper.height}`;
+	const name = KNOWN_PAPER[key];
+	return name ? `${key} (${name})` : key;
+}
+
+/**
+ * One-line description of how a document was laid out, for the sync log. Only
+ * produced when something differs from a plain Paper Pro notebook, so routine
+ * syncs stay quiet.
+ */
+async function describeLayout(
+	pages: Page[],
+	backgroundPdfs: (Uint8Array | null)[]
+): Promise<string | null> {
+	const papers = new Set(pages.map((p) => paperLabel(p.paperSize)));
+	const bgSizes = new Set<string>();
+	for (const bg of backgroundPdfs) {
+		if (!bg) continue;
+		try {
+			const doc = await PDFDocument.load(bg);
+			const { width, height } = doc.getPage(0).getCropBox();
+			bgSizes.add(`${Math.round(width)}x${Math.round(height)}pt`);
+		} catch { /* best-effort only */ }
+	}
+	const papersText = Array.from(papers).join(", ");
+	if (bgSizes.size === 0 && papersText === paperLabel({ width: 1620, height: 2160 })) {
+		return null;
+	}
+	const parts = [`paper ${papersText}`];
+	if (bgSizes.size > 0) parts.push(`PDF pages ${Array.from(bgSizes).join(", ")}`);
+	return `Layout: ${parts.join("; ")}`;
+}
+
 function emptyPage(pageId: string): Page {
 	return {
 		pageId,
@@ -343,8 +405,9 @@ function emptyPage(pageId: string): Page {
 
 export async function convertDocument(
 	docId: string,
-	files: Map<string, Uint8Array>
+	files: Map<string, Uint8Array>,
+	log?: (message: string) => void
 ): Promise<Uint8Array> {
 	const converter = new DocumentConverter(docId, files);
-	return converter.convertToPdf();
+	return converter.convertToPdf(log);
 }

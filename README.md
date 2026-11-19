@@ -1,6 +1,26 @@
 # reMarkable Sync for Obsidian
 
-Sync your reMarkable Paper Pro documents to your Obsidian vault as high-fidelity PDFs.
+Sync your reMarkable Paper Pro and Paper Pro Move documents to your Obsidian vault as high-fidelity PDFs.
+
+> **About this fork.** This is a fork of [TimDommett/Remarkable-Sync---Obsidian-Plugin](https://github.com/TimDommett/Remarkable-Sync---Obsidian-Plugin)
+> (v1.0.9) that adds support for the reMarkable Paper Pro Move:
+>
+> - **Annotated PDFs of any page size.** Handwriting on a PDF is now placed on the
+>   original page at the tablet's fixed scale (centred, top-aligned) instead of
+>   stretching a Paper Pro-sized canvas over the page. Before, ink on PDFs made
+>   for the Move (or any page larger than 514×685 pt) was cut off at the edges.
+> - **Paper size per page.** Each page's own paper size is read from the `.rm`
+>   file (SceneInfo), so Move notebooks render at the Move's page size.
+> - **No clipped ink.** Writing that runs outside the page (margin notes,
+>   zoomed-out writing) grows the output page instead of being cut off.
+> - **Rotated PDF pages** (`/Rotate`) get correctly oriented annotations.
+> - The sync log notes the paper size and PDF page size of any document that is
+>   not a plain Paper Pro notebook.
+>
+> Paper Pro notebooks and 514×685 pt PDFs render exactly as in v1.0.9. The
+> plugin id is unchanged (`remarkable-sync`), so settings and login carry over —
+> but don't accept an update for this plugin from the Community Plugins browser,
+> or it will be replaced with the upstream version.
 
 📦 Available on the [Obsidian Community Plugins directory](https://community.obsidian.md/plugins/remarkable-sync).
 

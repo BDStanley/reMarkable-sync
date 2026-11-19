@@ -76,7 +76,10 @@ tsconfig.json
 `pdf-renderer.ts`, `rm-parser.ts`, and the coordinate/scale constants are
 **calibrated against real reMarkable PDF exports** in `reference_sheets/`.
 Colors, pen widths, opacity, font sizes, and the coordinate mapping
-(`.rm` canvas `1404x1872`, center-origin X → `514pt`-wide PDF) are tuned to match
+(one `.rm` unit = `514/1620` pt, center-origin X; notebook canvases use the
+page's SceneInfo paper size, e.g. Paper Pro `1620x2160` → `514x685pt`, Paper Pro
+Move `954x1696`; annotations on PDFs are placed at that same fixed scale,
+centred and top-aligned on the original page) are tuned to match
 ground truth. If you touch any of this:
 
 1. Re-render and compare against `reference_sheets/` before/after.

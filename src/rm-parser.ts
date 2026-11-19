@@ -21,6 +21,18 @@ const BLOCK_SCENE_TREE = 1;
 const BLOCK_TREE_NODE = 2;
 const BLOCK_LINE_ITEM = 5;
 const BLOCK_ROOT_TEXT = 7;
+const BLOCK_SCENE_INFO = 0x0d;
+
+// Paper Pro canvas in .rm units. Pages without a SceneInfo paper size (older
+// firmware) keep using it, which matches the behaviour before paper sizes were
+// read.
+export const DEFAULT_PAPER_WIDTH = 1620;
+export const DEFAULT_PAPER_HEIGHT = 2160;
+
+// `Page.width`/`Page.height` are kept in the historical 1404-wide basis
+// (PDF points = value * 514/1404). One .rm unit is 514/1620 pt, so a paper
+// dimension in .rm units converts to that basis by * 1404/1620.
+const PAPER_TO_PAGE_BASIS = 1404 / 1620;
 
 // Tag types
 const TAG_BYTE1 = 0x1;
@@ -137,6 +149,13 @@ export interface Layer {
 	strokes: Stroke[];
 }
 
+export interface PaperSize {
+	/** Canvas width in .rm units (x runs from -width/2 to +width/2). */
+	width: number;
+	/** Canvas height in .rm units (y runs down from 0). */
+	height: number;
+}
+
 export interface Page {
 	pageId: string;
 	layers: Layer[];
@@ -144,6 +163,11 @@ export interface Page {
 	textBlocks: TextBlock[];
 	width: number;
 	height: number;
+	/**
+	 * Paper size the page was written on, from the SceneInfo block (e.g. Paper
+	 * Pro 1620x2160, Paper Pro Move 954x1696). Null when the file has none.
+	 */
+	paperSize?: PaperSize | null;
 }
 
 // --- Binary reader ---
@@ -855,6 +879,7 @@ export function parseRmFile(data: ArrayBuffer, debug = false): Page {
 	const sceneTreeEntries: SceneTreeEntry[] = [];
 	const treeNodeMap = new Map<string, TreeNodeData>();
 	let textResult: RootTextResult | null = null;
+	let paperSize: PaperSize | null = null;
 
 	// Skip header (exactly 43 bytes)
 	if (reader.remaining() < HEADER_LENGTH + 8) {
@@ -905,6 +930,11 @@ export function parseRmFile(data: ArrayBuffer, debug = false): Page {
 				const contentReader = reader.slice(contentStart, blockLen);
 				try {
 					textResult = parseRootTextBlock(contentReader);
+				} catch { /* skip */ }
+			} else if (blockType === BLOCK_SCENE_INFO && blockLen > 0) {
+				const contentReader = reader.slice(contentStart, blockLen);
+				try {
+					paperSize = parseSceneInfoBlock(contentReader) ?? paperSize;
 				} catch { /* skip */ }
 			}
 
@@ -973,9 +1003,51 @@ export function parseRmFile(data: ArrayBuffer, debug = false): Page {
 		layers,
 		textSpans: [],
 		textBlocks: textBlock ? [textBlock] : [],
-		width: 1404,
-		height: 1872,
+		...pageDimensionsForPaper(paperSize),
+		paperSize,
 	};
+}
+
+/**
+ * Page width/height (historical 1404 basis) for a paper size. Without a paper
+ * size this is the long-standing 1404x1872 default (= Paper Pro 1620x2160).
+ */
+export function pageDimensionsForPaper(
+	paperSize: PaperSize | null | undefined
+): { width: number; height: number } {
+	const w = paperSize?.width ?? DEFAULT_PAPER_WIDTH;
+	const h = paperSize?.height ?? DEFAULT_PAPER_HEIGHT;
+	return { width: w * PAPER_TO_PAGE_BASIS, height: h * PAPER_TO_PAGE_BASIS };
+}
+
+// --- SceneInfo block parsing ---
+
+/**
+ * SceneInfo (block 0x0D): tag 1 current layer, tags 2/3 visibility flags and,
+ * on newer firmware, tag 5 = sub-block holding the paper size as two u32s.
+ * Layout from rmscene's `SceneInfo.paper_size`.
+ */
+function parseSceneInfoBlock(reader: BinaryReader): PaperSize | null {
+	while (reader.remaining() > 0) {
+		const tag = readTag(reader);
+		if (tag.index === 5 && tag.type === TAG_LENGTH4) {
+			const len = reader.readU32();
+			if (len < 8) {
+				reader.skip(len);
+				continue;
+			}
+			const width = reader.readU32();
+			const height = reader.readU32();
+			reader.skip(len - 8);
+			// Ignore implausible values rather than producing a degenerate page.
+			if (width >= 100 && height >= 100 && width <= 20000 && height <= 20000) {
+				return { width, height };
+			}
+			return null;
+		}
+		skipTagValue(reader, tag);
+	}
+	return null;
 }
 
 // --- LineItem block parsing ---
