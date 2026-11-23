@@ -1,5 +1,9 @@
 export const DEFAULT_SUBFOLDER = "reMarkable";
 
+// The reMarkable folder the Zotero reMarkable plugin sends papers to. Its
+// annotations go back to Zotero, so it is always left out of the sync.
+export const ZOTERO_FOLDER = "Zotero";
+
 export const SYNC_INTERVALS: Record<string, number> = {
 	"Manual only": 0,
 	"Every 5 minutes": 5 * 60 * 1000,

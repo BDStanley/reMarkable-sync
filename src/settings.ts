@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type RemarkableSyncPlugin from "./main";
-import { SYNC_INTERVALS, AUTH_URL, DEFAULT_SUBFOLDER, SYNC_LOG_FILENAME } from "./constants";
+import { SYNC_INTERVALS, AUTH_URL, DEFAULT_SUBFOLDER, SYNC_LOG_FILENAME, ZOTERO_FOLDER } from "./constants";
 
 export interface RemarkableSyncSettings {
 	subfolder: string;
@@ -137,7 +137,7 @@ export class RemarkableSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Excluded folders")
-			.setDesc("Comma-separated reMarkable folders to skip, including their subfolders. Use full paths for nested folders.")
+			.setDesc(`Comma-separated reMarkable folders to skip, including their subfolders. Use full paths for nested folders. The folder "${ZOTERO_FOLDER}" (papers from Zotero reMarkable) is always skipped.`)
 			.addText((text) =>
 				text
 					.setPlaceholder("e.g., Archive, Work/Old")
