@@ -190,6 +190,14 @@ export default class RemarkableSyncPlugin extends Plugin {
 				const p = normalizePath(filePath);
 				if (await adapter.exists(p)) await adapter.remove(p);
 			},
+			async removeDirIfEmpty(dirPath: string): Promise<boolean> {
+				const p = normalizePath(dirPath);
+				if (!(await adapter.exists(p))) return false;
+				const listing = await adapter.list(p);
+				if (listing.files.length > 0 || listing.folders.length > 0) return false;
+				await adapter.rmdir(p, false);
+				return true;
+			},
 		};
 	}
 
@@ -255,7 +263,8 @@ export default class RemarkableSyncPlugin extends Plugin {
 
 			const results = await manager.sync(this.client, {
 				folderFilter: this.settings.folderFilter || undefined,
-				excludedFolders: [ZOTERO_FOLDER, ...parseFolderList(this.settings.excludedFolders)],
+				excludedFolders: parseFolderList(this.settings.excludedFolders),
+				purgedFolders: [ZOTERO_FOLDER],
 				force,
 				writeLog: this.settings.writeSyncLog,
 				logFileName: SYNC_LOG_FILENAME,
@@ -263,6 +272,12 @@ export default class RemarkableSyncPlugin extends Plugin {
 
 			this.settings.lastSyncTime = new Date().toISOString();
 			await this.saveSettings();
+
+			if (results.removed.length > 0) {
+				new Notice(
+					`reMarkable: Removed ${results.removed.length} PDF(s) of documents in the reMarkable folder "${ZOTERO_FOLDER}" from the vault.`
+				);
+			}
 
 			if (results.errors.length > 0) {
 				// Surface the first few error messages directly so users get

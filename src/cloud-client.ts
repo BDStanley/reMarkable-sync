@@ -55,6 +55,8 @@ export interface FileOps {
 	mkdir(path: string): Promise<void>;
 	exists(path: string): Promise<boolean>;
 	deleteFile(path: string): Promise<void>;
+	/** Remove a directory only if it is empty; resolves true if it was removed. */
+	removeDirIfEmpty?(path: string): Promise<boolean>;
 }
 
 // --- Token storage ---

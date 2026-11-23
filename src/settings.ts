@@ -137,7 +137,7 @@ export class RemarkableSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Excluded folders")
-			.setDesc(`Comma-separated reMarkable folders to skip, including their subfolders. Use full paths for nested folders. The folder "${ZOTERO_FOLDER}" (papers from Zotero reMarkable) is always skipped.`)
+			.setDesc(`Comma-separated reMarkable folders to skip, including their subfolders. Use full paths for nested folders. The folder "${ZOTERO_FOLDER}" (papers from Zotero reMarkable) is always skipped, and PDFs earlier syncs made from it are removed from the vault.`)
 			.addText((text) =>
 				text
 					.setPlaceholder("e.g., Archive, Work/Old")

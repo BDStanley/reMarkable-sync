@@ -16,9 +16,11 @@ function memoryFileOps(): {
 	ops: FileOps;
 	files: Map<string, string>;
 	binaryWrites: string[];
+	removedDirs: string[];
 } {
 	const files = new Map<string, string>();
 	const binaryWrites: string[] = [];
+	const removedDirs: string[] = [];
 	const ops: FileOps = {
 		readFile: async (p: string) => files.get(p) ?? null,
 		writeFile: async (p: string, data: string) => {
@@ -33,8 +35,13 @@ function memoryFileOps(): {
 		deleteFile: async (p: string) => {
 			files.delete(p);
 		},
+		removeDirIfEmpty: async (dir: string) => {
+			for (const p of files.keys()) if (p.startsWith(`${dir}/`)) return false;
+			removedDirs.push(dir);
+			return true;
+		},
 	};
-	return { ops, files, binaryWrites };
+	return { ops, files, binaryWrites, removedDirs };
 }
 
 function doc(
@@ -407,4 +414,110 @@ test("sync skips documents inside excluded folders and their subfolders", async 
 
 	const attempted = results.errorDetails.map((e) => e.docId).sort();
 	assert.deepEqual(attempted, ["d-root", "d-work"]);
+});
+
+function folderDoc(id: string, name: string, parent = ""): DocumentMetadata {
+	return { ...doc(id, name), parent, docType: "CollectionType" };
+}
+
+function docIn(id: string, name: string, parent: string): DocumentMetadata {
+	return { ...doc(id, name), parent };
+}
+
+/** A reMarkable library with a Zotero folder, plus look-alikes that must be kept. */
+function zoteroLibrary(): DocumentMetadata[] {
+	return [
+		folderDoc("f-zotero", "Zotero"),
+		folderDoc("f-topic", "Topic", "f-zotero"),
+		folderDoc("f-work", "Work"),
+		folderDoc("f-notes", "Zotero notes"),
+		docIn("d-paper", "Paper", "f-zotero"),
+		docIn("d-deep", "Deep", "f-topic"),
+		docIn("d-moved-in", "Moved", "f-zotero"),
+		docIn("d-keep", "Plan", "f-work"),
+		docIn("d-lookalike", "Idea", "f-notes"),
+		docIn("d-new", "New", "f-zotero"),
+	];
+}
+
+function stateWithPdfs(
+	files: Map<string, string>,
+	entries: Record<string, string>
+): SyncState {
+	const state = new SyncState();
+	for (const [id, path] of Object.entries(entries)) {
+		state.syncedDocs[id] = syncedInfo(`hash-${id}`, path);
+		files.set(`/vault/${path}`, "<pdf>");
+	}
+	return state;
+}
+
+test("sync removes earlier PDFs of documents in purged folders and never syncs them", async () => {
+	const { ops, files, removedDirs } = memoryFileOps();
+	const state = stateWithPdfs(files, {
+		"d-paper": "reMarkable/Zotero/Paper.pdf",
+		"d-deep": "reMarkable/Zotero/Topic/Deep.pdf",
+		// Synced from another folder, since moved into Zotero on the reMarkable.
+		"d-moved-in": "reMarkable/Inbox/Moved.pdf",
+		// Synced from Zotero, since deleted on the reMarkable.
+		"d-gone": "reMarkable/Zotero/Gone.pdf",
+		"d-keep": "reMarkable/Work/Plan.pdf",
+		"d-lookalike": "reMarkable/Zotero notes/Idea.pdf",
+	});
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	const results = await manager.sync(failingClient(zoteroLibrary()), {
+		writeLog: false,
+		purgedFolders: ["Zotero"],
+	});
+
+	assert.deepEqual(results.errorDetails.map((e) => e.docId), [], "nothing in Zotero is downloaded");
+	assert.deepEqual(results.removed.sort(), [
+		"reMarkable/Inbox/Moved.pdf",
+		"reMarkable/Zotero/Gone.pdf",
+		"reMarkable/Zotero/Paper.pdf",
+		"reMarkable/Zotero/Topic/Deep.pdf",
+	]);
+	const pdfs = [...files.keys()].filter((p) => p.endsWith(".pdf")).sort();
+	assert.deepEqual(pdfs, [
+		"/vault/reMarkable/Work/Plan.pdf",
+		"/vault/reMarkable/Zotero notes/Idea.pdf",
+	]);
+	assert.deepEqual(removedDirs.sort(), [
+		"/vault/reMarkable/Inbox",
+		"/vault/reMarkable/Zotero",
+		"/vault/reMarkable/Zotero/Topic",
+	]);
+
+	const saved = JSON.parse(files.get("/vault/reMarkable/.remarkable-sync-state.json")!);
+	assert.deepEqual(Object.keys(saved.synced_docs).sort(), ["d-keep", "d-lookalike"]);
+});
+
+test("a dry run only reports the PDFs a purge would remove", async () => {
+	const { ops, files, removedDirs } = memoryFileOps();
+	const state = stateWithPdfs(files, { "d-paper": "reMarkable/Zotero/Paper.pdf" });
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	const results = await manager.sync(failingClient(zoteroLibrary()), {
+		writeLog: false,
+		dryRun: true,
+		purgedFolders: ["Zotero"],
+	});
+
+	assert.deepEqual(results.removed, ["reMarkable/Zotero/Paper.pdf"]);
+	assert.ok(files.has("/vault/reMarkable/Zotero/Paper.pdf"));
+	assert.deepEqual(removedDirs, []);
+	assert.ok(state.syncedDocs["d-paper"]);
+});
+
+test("the sync log lists removed PDFs", async () => {
+	const { ops, files } = memoryFileOps();
+	const state = stateWithPdfs(files, { "d-paper": "reMarkable/Zotero/Paper.pdf" });
+	const manager = new SyncManager("/vault", "reMarkable", ops, state);
+
+	await manager.sync(failingClient(zoteroLibrary()), { purgedFolders: ["Zotero"] });
+
+	const log = [...files.entries()].find(([p]) => p.endsWith(".md"))?.[1] ?? "";
+	assert.match(log, /1 removed/);
+	assert.match(log, /### Removed \(1\)\n\n- `reMarkable\/Zotero\/Paper\.pdf`/);
 });
