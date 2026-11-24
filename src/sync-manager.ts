@@ -92,6 +92,8 @@ export interface SyncResults {
 	durationMs: number;
 	/** Vault-relative path of the log file written for this run, if any. */
 	logPath: string | null;
+	/** Vault-relative paths of earlier PDFs removed because their folder is purged. */
+	removed: string[];
 }
 
 /**
@@ -107,6 +109,15 @@ export function parseFolderList(value: string): string[] {
 
 function normalizeFolderPath(folder: string): string {
 	return folder.trim().replace(/^\/+|\/+$/g, "");
+}
+
+function normalizeFolderList(folders: string[] | undefined): string[] {
+	return (folders ?? []).map(normalizeFolderPath).filter((f) => f !== "");
+}
+
+/** Map a reMarkable path to the name used in the vault (safe on Windows too; backslash included: names must not create folders). */
+function toVaultName(docPath: string): string {
+	return docPath.replace(/[<>:"|?*\\]/g, "_");
 }
 
 /**
@@ -125,6 +136,11 @@ export interface SyncOptions {
 	folderFilter?: string;
 	/** reMarkable folder paths whose documents (including subfolders) are skipped. */
 	excludedFolders?: string[];
+	/**
+	 * reMarkable folders skipped like `excludedFolders`, whose PDFs from earlier
+	 * syncs are also removed from the vault (with folders that leaves empty).
+	 */
+	purgedFolders?: string[];
 	force?: boolean;
 	dryRun?: boolean;
 	subfolder?: string;
@@ -181,6 +197,7 @@ export class SyncManager {
 			finishedAt: "",
 			durationMs: 0,
 			logPath: null,
+			removed: [],
 		};
 		const writeLog = opts.writeLog ?? true;
 		const logFileName = opts.logFileName ?? SYNC_LOG_FILENAME;
@@ -237,14 +254,23 @@ export class SyncManager {
 				)
 			: docsToSync;
 
-		const excluded = (opts.excludedFolders ?? [])
-			.map(normalizeFolderPath)
-			.filter((f) => f !== "");
+		const purged = normalizeFolderList(opts.purgedFolders);
+		const excluded = [...normalizeFolderList(opts.excludedFolders), ...purged];
 		const included = excluded.length
 			? filtered.filter(
 					(doc) => !isInExcludedFolder(folderPaths.get(doc.id) ?? doc.name, excluded)
 				)
 			: filtered;
+
+		if (purged.length) {
+			results.removed = await this.purge(
+				purged,
+				docsToSync,
+				folderPaths,
+				opts.dryRun ?? false,
+				progress
+			);
+		}
 
 		progress(`Found ${included.length} documents to check`);
 
@@ -290,7 +316,8 @@ export class SyncManager {
 
 		progress(
 			`Sync finished — ${results.synced.length} synced, ` +
-				`${results.skipped.length} skipped, ${results.errors.length} errors`
+				`${results.skipped.length} skipped, ${results.errors.length} errors` +
+				(results.removed.length ? `, ${results.removed.length} removed` : "")
 		);
 
 		await finalize();
@@ -349,9 +376,7 @@ export class SyncManager {
 			progress(`${message} — ${docPath}`)
 		);
 
-		// Sanitize path for Windows (backslash included: names must not create folders)
-		const safePath = docPath.replace(/[<>:"|?*\\]/g, "_");
-		const outputPath = joinPath(this.outputDir, safePath + ".pdf");
+		const outputPath = joinPath(this.outputDir, toVaultName(docPath) + ".pdf");
 
 		// Ensure parent directory exists
 		const parentDir = outputPath.substring(0, outputPath.lastIndexOf("/"));
@@ -392,6 +417,68 @@ export class SyncManager {
 			entryHash: doc.entryHash,
 		};
 		await this.state.save(this.stateFile, this.fileOps);
+	}
+
+	/**
+	 * Remove the PDFs earlier syncs wrote for documents in the purged folders,
+	 * and forget them in the sync state. A document counts if it is in one of
+	 * the folders on the reMarkable now, or if its PDF was written inside one
+	 * of them in the vault (covering documents since deleted on the reMarkable).
+	 * Only files recorded in the sync state are touched.
+	 */
+	private async purge(
+		folders: string[],
+		docs: DocumentMetadata[],
+		folderPaths: Map<string, string>,
+		dryRun: boolean,
+		progress: ProgressCallback
+	): Promise<string[]> {
+		const vaultPrefixes = folders.map(
+			(f) => this.toVaultRelative(joinPath(this.outputDir, toVaultName(f))) + "/"
+		);
+		const ids = new Set<string>();
+		for (const doc of docs) {
+			const docPath = folderPaths.get(doc.id) ?? doc.name;
+			if (this.state.syncedDocs[doc.id] && isInExcludedFolder(docPath, folders)) {
+				ids.add(doc.id);
+			}
+		}
+		for (const [id, info] of Object.entries(this.state.syncedDocs)) {
+			if (vaultPrefixes.some((prefix) => info?.path?.startsWith(prefix))) ids.add(id);
+		}
+
+		const removed: string[] = [];
+		for (const id of ids) {
+			const relPath = this.state.syncedDocs[id]?.path;
+			if (typeof relPath !== "string" || relPath === "") continue;
+			if (dryRun) {
+				progress(`[dry-run] Would remove: ${relPath}`);
+				removed.push(relPath);
+				continue;
+			}
+			const filePath = joinPath(this.vaultPath, relPath);
+			try {
+				await this.fileOps.deleteFile(filePath);
+				await this.removeEmptyParents(filePath);
+				delete this.state.syncedDocs[id];
+				removed.push(relPath);
+				progress(`Removed: ${relPath}`);
+			} catch (e) {
+				progress(`(could not remove ${relPath}: ${(e as Error).message})`);
+			}
+		}
+		return removed;
+	}
+
+	/** Remove the now-empty folders above a deleted file, stopping at the sync folder. */
+	private async removeEmptyParents(filePath: string): Promise<void> {
+		if (!this.fileOps.removeDirIfEmpty) return;
+		const root = this.outputDir;
+		let dir = filePath.substring(0, Math.max(0, filePath.lastIndexOf("/")));
+		while (dir && dir !== root && (root === "" || dir.startsWith(root + "/"))) {
+			if (!(await this.fileOps.removeDirIfEmpty(dir))) return;
+			dir = dir.substring(0, Math.max(0, dir.lastIndexOf("/")));
+		}
 	}
 
 	/** Strip the vault prefix so state paths stay portable across vault locations. */
@@ -459,7 +546,8 @@ function formatRunSection(results: SyncResults): string {
 	lines.push("");
 	lines.push(
 		`- **Result:** ${results.synced.length} synced, ` +
-			`${results.skipped.length} skipped, ${results.errors.length} errors`
+			`${results.skipped.length} skipped, ${results.errors.length} errors` +
+			(results.removed.length ? `, ${results.removed.length} removed` : "")
 	);
 	lines.push(`- **Duration:** ${seconds}s`);
 	lines.push("");
@@ -477,6 +565,15 @@ function formatRunSection(results: SyncResults): string {
 		lines.push(`### Synced (${results.synced.length})`);
 		lines.push("");
 		for (const path of results.synced) {
+			lines.push(`- \`${path}\``);
+		}
+		lines.push("");
+	}
+
+	if (results.removed.length > 0) {
+		lines.push(`### Removed (${results.removed.length})`);
+		lines.push("");
+		for (const path of results.removed) {
 			lines.push(`- \`${path}\``);
 		}
 		lines.push("");
