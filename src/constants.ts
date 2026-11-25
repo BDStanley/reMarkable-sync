@@ -1,8 +1,9 @@
 export const DEFAULT_SUBFOLDER = "reMarkable";
 
-// The reMarkable folder the Zotero reMarkable plugin sends papers to. Its
-// annotations go back to Zotero, so it is always left out of the sync.
-export const ZOTERO_FOLDER = "Zotero";
+// The reMarkable folders the Zotero reMarkable plugin sends papers to (Zotero
+// is the old name of Articles). Their annotations go back to Zotero, so they
+// are always left out of the sync.
+export const ZOTERO_FOLDERS = ["Zotero", "Articles", "Books"];
 
 export const SYNC_INTERVALS: Record<string, number> = {
 	"Manual only": 0,

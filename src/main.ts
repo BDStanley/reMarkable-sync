@@ -2,7 +2,7 @@ import { Notice, Plugin, TFile, normalizePath, requestUrl } from "obsidian";
 import { RemarkableSyncSettings, DEFAULT_SETTINGS, RemarkableSyncSettingTab } from "./settings";
 import { RemarkableCloudClient, type FileOps, type FetchFn, type FetchResponse } from "./cloud-client";
 import { SyncManager, parseFolderList } from "./sync-manager";
-import { SYNC_INTERVALS, SYNC_LOG_FILENAME, ZOTERO_FOLDER } from "./constants";
+import { SYNC_INTERVALS, SYNC_LOG_FILENAME, ZOTERO_FOLDERS } from "./constants";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -264,7 +264,7 @@ export default class RemarkableSyncPlugin extends Plugin {
 			const results = await manager.sync(this.client, {
 				folderFilter: this.settings.folderFilter || undefined,
 				excludedFolders: parseFolderList(this.settings.excludedFolders),
-				purgedFolders: [ZOTERO_FOLDER],
+				purgedFolders: ZOTERO_FOLDERS,
 				force,
 				writeLog: this.settings.writeSyncLog,
 				logFileName: SYNC_LOG_FILENAME,
@@ -275,7 +275,7 @@ export default class RemarkableSyncPlugin extends Plugin {
 
 			if (results.removed.length > 0) {
 				new Notice(
-					`reMarkable: Removed ${results.removed.length} PDF(s) of documents in the reMarkable folder "${ZOTERO_FOLDER}" from the vault.`
+					`reMarkable: Removed ${results.removed.length} PDF(s) of documents in the reMarkable folders ${ZOTERO_FOLDERS.map((f) => `"${f}"`).join(", ")} from the vault.`
 				);
 			}
 
